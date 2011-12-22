@@ -32,6 +32,7 @@
 (require 'oauth2)
 (require 'json)
 (require 'org)
+(require 'icalendar)
 
 (defconst google-calendar-api-uri "https://www.googleapis.com/calendar/v3"
   "Base URI of the Google Calendar REST API server")
@@ -57,6 +58,11 @@
   "Time to keep calendars entry in cache without refreshing."
   :group 'google-calendar
   :type 'integer)
+
+(defcustom google-calendar-account-email-address nil
+  "Email address associated to the google account (if left nil, will be automatically guess)"
+  :group 'google-calendar
+  :type 'string)
 
 (defun google-calendar-auth-and-store()
   "Request a OAuth2 token and store it"
@@ -149,6 +155,18 @@ If WRITABLE is non nil then only writable calendars are returned"
             ))
     res))
 
+(defun google-calendar-account-email-address()
+  "Returns the email address of the authentication email address"
+  (if (not google-calendar-account-email-address)
+      (loop for calendar across (google-calendar-writable-calendars-vector) do
+          (dolist (calendar-property calendar)
+            (if (and (equal 'summary (car calendar-property))
+                     (not (string-match "@group\.calendar\.google\.com$"
+                                        (cdr (assoc 'id calendar)))))
+                (setq google-calendar-account-email-address (cdr (assoc 'id calendar)))))))
+
+  google-calendar-account-email-address)
+
 (defun google-calendar-get-id-by-name (name)
   "Returns a google calendar ID from its name"
   (let ((cal-id))
@@ -170,10 +188,225 @@ If WRITABLE is non nil then only writable calendars are returned"
     value))
 
 (defun google-calendar-read-date-time (&optional prompt)
-  "Prompt the user for a date and a time and returns a RFC3999 date time string"
+  "Prompt the user for a date and a time and returns a RFC3339 date time string"
   (format-time-string
    "%Y-%m-%dT%H:%M:%S.00%z"
    (org-read-date t t nil prompt)))
+
+(defun google-calendar-ical-format-string(event prop)
+  "Correctly format a string field extracted from an iCal event"
+  (icalendar--convert-string-for-import (icalendar--get-event-property event prop)))
+
+(defun google-calendar-ical-format-email(str)
+  "Extract an email address from an iCal property string"
+
+  (if (string-match "^mailto:\\(.*\\)$" str)
+      (setq str (match-string 1 str)))
+
+  ;; icalendar--get-event-property badly interpret indentation of multi lines
+  ;; so we are just making sure it won't break email addresses
+  (replace-in-string str " " ""))
+
+(defun google-calendar-ical-format-attendees(event)
+  "Correctly format email attendees field from an iCal event.
+
+Adds authenticated user email address if not present."
+  (let ((attendees (icalendar--get-event-properties event 'ATTENDEE))
+        (json [])
+        email google-calendar-email-found)
+    (if attendees
+        (dolist (attendee attendees json)
+          (setq email (google-calendar-ical-format-email attendee))
+          (if (and
+               (not google-calendar-email-found)
+               (string= email (google-calendar-account-email-address)))
+              (setq google-calendar-email-found t))
+
+          (setq json (vconcat json (vector (list (cons "email" email)))))))
+
+    (if (not google-calendar-email-found)
+        (setq json (vconcat json (vector (list (cons "email" (google-calendar-account-email-address)))))))
+
+    json))
+
+(defun google-calendar-ical-format-cn(event prop)
+  "Correctly format a CN field extracted from an iCal event"
+  (let (json display-name
+        (email (google-calendar-ical-format-email (icalendar--convert-string-for-import (icalendar--get-event-property event prop))))
+        (cn (icalendar--get-event-property-attributes event prop)))
+
+    (setq json (list (cons "email" email)))
+    (if cn
+        (setq display-name (nth 1 cn)))
+
+    (if display-name
+        (append json
+                (list (cons "displayName" display-name)))
+      json)))
+
+(defun google-calendar-ical-get-events(buffer)
+  "Parse a buffer and extracts all iCal events from there.
+Returns a list whose first element is the events list and second one is the timezones map"
+
+  (with-current-buffer (icalendar--get-unfolded-buffer buffer)
+    (goto-char (point-min))
+    (if (re-search-forward "^BEGIN:VCALENDAR\\s-*$" nil t)
+        (let (ical-list)
+          ;; read ical
+          (beginning-of-line)
+          (setq ical-list (icalendar--read-element nil nil))
+          (list (icalendar--all-events ical-list) (icalendar--convert-all-timezones ical-list)))
+      (error "Current buffer does not contain iCalendar contents"))))
+
+(defun google-calendar-ical-event-to-json(event zone-map)
+  "Parse the content of an iCal event into a json representation understable by google calendar"
+
+  (let* (json-data diary-string
+         (dtstart (icalendar--get-event-property event 'DTSTART))
+         (dtstart-zone (icalendar--find-time-zone
+                        (icalendar--get-event-property-attributes
+                         event 'DTSTART)
+                        zone-map))
+         (dtstart-dec (icalendar--decode-isodatetime dtstart nil
+                                                     dtstart-zone))
+         (start-d (icalendar--datetime-to-iso-date
+                   dtstart-dec "-"))
+         (start-t (icalendar--datetime-to-colontime dtstart-dec))
+         (dtend (icalendar--get-event-property event 'DTEND))
+         (dtend-zone (icalendar--find-time-zone
+                      (icalendar--get-event-property-attributes
+                       event 'DTEND)
+                      zone-map))
+         (dtend-dec (icalendar--decode-isodatetime dtend
+                                                   nil dtend-zone))
+         (dtend-1-dec (icalendar--decode-isodatetime dtend -1
+                                                     dtend-zone))
+         end-d
+         end-1-d
+         end-t
+         (summary (icalendar--convert-string-for-import
+                   (or (icalendar--get-event-property event 'SUMMARY)
+                       "No summary")))
+         (rrule (icalendar--get-event-property event 'RRULE))
+         (rdate (icalendar--get-event-property event 'RDATE))
+         (exdate (icalendar--get-event-property event 'EXDATE))
+         (duration (icalendar--get-event-property event 'DURATION))
+         event-ok)
+    (message (format "%s: `%s'" start-d summary))
+    (setq json-data (list (cons "summary" summary)))
+    ;; check whether start-time is missing
+    (if  (and dtstart
+              (string=
+               (cadr (icalendar--get-event-property-attributes
+                      event 'DTSTART))
+               "DATE"))
+        (setq start-t nil))
+    (when duration
+      (let ((dtend-dec-d (icalendar--add-decoded-times
+                          dtstart-dec
+                          (icalendar--decode-isoduration duration)))
+            (dtend-1-dec-d (icalendar--add-decoded-times
+                            dtstart-dec
+                            (icalendar--decode-isoduration duration
+                                                           t))))
+        (if (and dtend-dec (not (eq dtend-dec dtend-dec-d)))
+            (message "Inconsistent endtime and duration for %s"
+                     summary))
+        (setq dtend-dec dtend-dec-d)
+        (setq dtend-1-dec dtend-1-dec-d)))
+    (setq end-d (if dtend-dec
+                    (icalendar--datetime-to-iso-date dtend-dec "-")
+                  start-d))
+    (setq end-1-d (if dtend-1-dec
+                      (icalendar--datetime-to-iso-date dtend-1-dec "-")
+                    start-d))
+    (setq end-t (if (and
+                     dtend-dec
+                     (not (string=
+                           (cadr
+                            (icalendar--get-event-property-attributes
+                             event 'DTEND))
+                           "DATE")))
+                    (icalendar--datetime-to-colontime dtend-dec)
+                  start-t))
+
+    (setq json-data (append json-data (list
+                                       (cons "start"
+                                             (list
+                                              (cons
+                                               "dateTime"
+                                               (format-time-string
+                                                "%Y-%m-%dT%H:%M:%S.00%z"
+                                                (date-to-time (concat start-d " " start-t (format-time-string "%z"))))))))))
+    (setq json-data (append json-data (list
+                                       (cons "end"
+                                             (list
+                                              (cons
+                                               "dateTime"
+                                               (format-time-string
+                                                "%Y-%m-%dT%H:%M:%S.00%z"
+                                                (date-to-time (concat end-d " " end-t (format-time-string "%z"))))))))))
+
+    (let ((recurrence []))
+      (if rrule
+          (setq recurrence (vconcat recurrence (vector rrule))))
+      (if rdate
+          (setq recurrence (vconcat recurrence (vector rdate))))
+      (if exdate
+          (setq recurrence (vconcat recurrence (vector exdate))))
+
+      (if (> (length recurrence) 0)
+          (progn
+            (setq event-ok t)
+            (setq json-data (append json-data (list (cons "recurrence" recurrence)))))))
+
+     ;; non-recurring event
+     ;; all-day event
+    (cond
+     ((not (string= start-d end-d))
+      (setq event-ok t))
+
+     ;; not all-day
+     ((and start-t (or (not end-t)
+                       (not (string= start-t end-t))))
+      (setq event-ok t))
+     ;; all-day event
+     (t
+      (setq event-ok t)))
+
+    ;; attendees
+    (let ((attendees-data (google-calendar-ical-format-attendees event)))
+      (if attendees-data
+          (setq json-data (append json-data (list (cons "attendees" attendees-data))))))
+
+    ;; other "simple" properties
+    (let ((conversion-list
+           '(("description" DESCRIPTION google-calendar-ical-format-string)
+             ("location" LOCATION google-calendar-ical-format-string)
+             ("visibility" PUBLIC google-calendar-ical-format-string)
+             ("organizer" ORGANIZER google-calendar-ical-format-cn)
+             ("htmlLink" URL google-calendar-ical-format-string)
+             ("iCalUID" UID google-calendar-ical-format-string)
+             ("status" STATUS google-calendar-ical-format-string))))
+
+      (mapc (lambda (i)
+              (let* ((json-name (car i))
+                     (prop (cadr i))
+                     (format (car (cddr i)))
+                     (contents (icalendar--get-event-property event prop)))
+                (when (and contents (> (length contents) 0))
+                  (setq json-data
+                        (append json-data
+                                (list
+                                 (cons json-name
+                                       (funcall format event prop)))))
+                  )))
+            conversion-list))
+
+    (if event-ok
+        (json-encode json-data)
+      (error (format "%s\nCannot handle this event: %s"
+                     error-string event)))))
 
 (defun google-calendar-get-events(calendar-name)
   "Retrieve events from a google calendar"
@@ -185,8 +418,8 @@ If WRITABLE is non nil then only writable calendars are returned"
 
 If called non interactively CALENDAR-NAME represents the name of the calendar
 you want to update, EVENT-NAME the name of the event to date,
-EVENT-START-DATE-TIME a RFC3999 date time to identify the start time of
-the event and EVENT-END-DATE-TIME the end RCF3999 date time.
+EVENT-START-DATE-TIME a RFC3339 date time to identify the start time of
+the event and EVENT-END-DATE-TIME the end RCF3339 date time.
 DESCRIPTION would receive an optional description of the event"
   (interactive
    (list
@@ -212,6 +445,54 @@ DESCRIPTION would receive an optional description of the event"
        (concat (google-calendar-get-id-by-name calendar-name) "/events")
        "calendars")
       request-method request-data request-extra-headers))))
+
+;;;###autoload
+(defun google-calendar-import-ical-region(calendar-name)
+  "Import the current region as an iCal event into google calendar.
+
+If called non interactively CALENDAR-NAME represents the name of the calendar
+you want to update"
+  (interactive
+   (list
+    (completing-read "Enter calendar to use: " (google-calendar-calendars-completion-list t))))
+
+  (unless (use-region-p)
+    (error "No active region"))
+
+  (let
+      ((ical-string (buffer-substring (region-beginning) (region-end))))
+    (with-temp-buffer
+      (insert ical-string)
+      (goto-char (point-min))
+      (google-calendar-import-ical-buffer(calendar-name (current-buffer))))))
+
+;;;###autoload
+(defun google-calendar-import-ical-buffer(calendar-name buffer)
+  "Import a buffer containing an iCal data into calendar name CALENDAR-NAME"
+  (interactive
+   (list
+    (completing-read "Enter calendar to use: " (google-calendar-calendars-completion-list t))
+    (read-buffer "Buffer containing ical data to import: ")))
+
+  (with-current-buffer buffer
+    (let ((ical-data (google-calendar-ical-get-events buffer))
+          (request-extra-headers
+             '(("Content-Type" . "application/json")))
+          events zone-map event request-data)
+
+      (setq events (nth 0 ical-data))
+      (setq zone-map (nth 1 ical-data))
+      (while events
+        (setq event (car events)
+              events (cdr events)
+              request-data (google-calendar-ical-event-to-json event zone-map))
+        (google-calendar-http-data
+         (oauth2-url-retrieve-synchronously
+          (google-calendar-auth-and-store)
+          (google-calendar-build-full-url
+           (concat (google-calendar-get-id-by-name calendar-name) "/events/import")
+           "calendars")
+          "POST" request-data request-extra-headers))))))
 
 (provide 'google-calendar)
 
