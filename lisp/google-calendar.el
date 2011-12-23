@@ -438,14 +438,19 @@ If specified, FIELDS is a list of Google Calendar symbol. Default value is
   events))
 
 ;;;###autoload
-(defun google-calendar-add-event(calendar-name event-name event-start-date-time event-end-date-time &optional description)
+(defun google-calendar-add-event(calendar-name event-name event-start-date-time event-end-date-time &optional description additional-fields)
   "Create a new event on a google calendar
 
 If called non interactively CALENDAR-NAME represents the name of the calendar
 you want to update, EVENT-NAME the name of the event to date,
 EVENT-START-DATE-TIME a RFC3339 date time to identify the start time of
 the event and EVENT-END-DATE-TIME the end RCF3339 date time.
-DESCRIPTION would receive an optional description of the event"
+DESCRIPTION would receive an optional description of the event.
+
+When called non interactively ADDITIONAL-FIELDS can be used to specify the other
+optional fields of the event. It's supposed to be a vector of
+(list (cons 'property-name property-value)). For example:
+(list (cons 'attendees (vector (list (cons \"email\" \"john.doe@example.com\")))))"
   (interactive
    (list
     (completing-read "Enter calendar to use: " (google-calendar-calendars-completion-list t))
@@ -457,10 +462,12 @@ DESCRIPTION would receive an optional description of the event"
       ((request-method "POST")
        (request-data
         (json-encode
-         (list (cons "description" (or description ""))
-               (cons "summary" event-name)
-               (cons "start" (list (cons "dateTime" event-start-date-time)))
-               (cons "end" (list (cons "dateTime" event-end-date-time))))))
+         (append
+          (list (cons "description" (or description ""))
+                (cons "summary" event-name)
+                (cons "start" (list (cons "dateTime" event-start-date-time)))
+                (cons "end" (list (cons "dateTime" event-end-date-time))))
+          additional-fields)))
        (request-extra-headers
              '(("Content-Type" . "application/json"))))
     (google-calendar-http-data
