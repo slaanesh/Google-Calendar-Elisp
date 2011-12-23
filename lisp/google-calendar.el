@@ -410,7 +410,32 @@ Returns a list whose first element is the events list and second one is the time
 
 (defun google-calendar-get-events(calendar-name)
   "Retrieve events from a google calendar"
-  (google-calendar-http-data (google-calendar-url-retrieve (google-calendar-build-full-url (concat (google-calendar-get-id-by-name calendar-name) "/events") "calendars"))))
+  (cdr (assoc 'items (google-calendar-http-data (google-calendar-url-retrieve (google-calendar-build-full-url (concat (google-calendar-get-id-by-name calendar-name) "/events") "calendars"))))))
+
+(defun google-calendar-query-events(calendar-name query &optional fields)
+  "Search for QUERY in FIELDS in CALENDAR-NAME events and returns matching events.
+
+If specified, FIELDS is a list of Google Calendar symbol. Default value is
+`(list 'summary 'description)'."
+
+  (if (not fields)
+      (setq fields (list 'summary 'description)))
+
+  (let ((events []) (case-fold-search t) match in-searched-property)
+    (loop for calendar across (google-calendar-get-events calendar-name) do
+          (setq current-id nil
+                match nil
+                in-searched-property nil)
+          (dolist (calendar-property calendar)
+            (dolist (field fields)
+              (if (equal field (car calendar-property))
+                  (setq in-searched-property t)))
+            (if (and in-searched-property
+                     (string-match query (cdr calendar-property)))
+                (setq match t)))
+          (if match
+              (setq events (vconcat events (vector calendar)))))
+  events))
 
 ;;;###autoload
 (defun google-calendar-add-event(calendar-name event-name event-start-date-time event-end-date-time &optional description)
