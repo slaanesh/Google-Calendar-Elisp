@@ -437,6 +437,145 @@ If specified, FIELDS is a list of Google Calendar symbol. Default value is
               (setq events (vconcat events (vector calendar)))))
   events))
 
+(defun google-calendar-ical-convert-datetime(dt)
+  "Convert a google calender date time following RFC 3339 into an ical representration"
+  (format-time-string
+   "%Y-%m-%d %H:%M:%SZ"
+   (date-to-time
+    (if (string-match "^\\(.*\\)\\+\\([0-9]+\\):\\([0-9]+\\)$" dt)
+        (concat (match-string 1 dt) "+" (match-string 2 dt) (match-string 3 dt))
+      dt)) t))
+
+(defun google-calendar-ical-fold-string(str)
+  "Fold a string to follow ical format"
+  (if (< (length str) 75)
+      str
+    (concat (substring str 0 74) "\n\t" (google-calendar-ical-fold-string (substring str 74)))))
+
+(defun google-calendar-event-to-ical(event)
+  "Convert a single google calendar event into an iCal string"
+
+  (let ((ical-str "\nBEGIN:VEVENT")
+        (attendees (assoc 'attendees event))
+        (recurrence (assoc 'recurrence event))
+        (organizer (assoc 'organizer event))
+        (description (assoc 'description event))
+        (location (assoc 'location event))
+        (url (assoc 'htmlLink event))
+        (creation (assoc 'created event))
+        (updated (assoc 'updated event))
+        (sequence (assoc 'sequence event))
+        (class (assoc 'visibility event))
+        )
+    (setq ical-str
+          (concat ical-str
+                  "\nUID:" (google-calendar-ical-fold-string (cdr (or (assoc 'iCalUID event) (assoc 'id event))))
+                  "\nSUMMARY:" (google-calendar-ical-fold-string (cdr (assoc 'summary event)))
+                  "\nDTSTART:" (google-calendar-ical-convert-datetime (cdr (assoc 'dateTime (cdr (assoc 'start event)))))
+                  "\nDTEND:" (google-calendar-ical-convert-datetime (cdr (assoc 'dateTime (cdr (assoc 'end event)))))
+                  ))
+
+
+     ;; description
+     (if description
+      (setq ical-str
+            (concat ical-str
+                    (google-calendar-ical-fold-string (concat "\nDESCRIPTION:" (cdr description))))))
+
+     ;; location
+     (if location
+      (setq ical-str
+            (concat ical-str
+                    (google-calendar-ical-fold-string (concat "\nLOCATION:" (cdr location))))))
+
+     ;; url
+     (if url
+      (setq ical-str
+            (concat ical-str
+                    (google-calendar-ical-fold-string (concat "\nURL:" (cdr url))))))
+
+     ;; creation
+     (if creation
+      (setq ical-str
+            (concat ical-str
+                    (concat "\nCREATED:" (google-calendar-ical-convert-datetime (cdr creation))))))
+
+     ;; updated
+     (if updated
+      (setq ical-str
+            (concat ical-str
+                    (concat "\nLAST-MODIFIED:" (google-calendar-ical-convert-datetime (cdr updated))))))
+
+     ;; sequence
+     (if sequence
+      (setq ical-str
+            (concat ical-str
+                    (google-calendar-ical-fold-string (concat "\nSEQUENCE:" (int-to-string (cdr sequence)))))))
+
+     ;; class
+     (if class
+      (setq ical-str
+            (concat ical-str
+                    (google-calendar-ical-fold-string (concat "\nCLASS:" (cdr class))))))
+
+     ;; attendees
+     (if attendees
+      (loop for attendee across (cdr attendees) do
+            (let ((email (cdr (assoc 'email attendee)))
+                  (display-name (assoc 'displayName attendee)))
+              (if display-name
+                  (setq display-name (cdr display-name))
+                (setq display-name email))
+
+              (setq ical-str
+                    (concat ical-str
+                            (google-calendar-ical-fold-string (concat "\nATTENDEE;CN=" display-name ":mailto:" email)))))))
+
+     ;; recurrence
+     (if recurrence
+      (loop for rule across (cdr recurrence) do
+            (setq ical-str
+                  (concat ical-str
+                          (google-calendar-ical-fold-string rule)))))
+
+     ;; organizer
+     (if organizer
+      (setq organizer (cdr organizer))
+      (let ((email (cdr (assoc 'email organizer)))
+                  (display-name (assoc 'displayName organizer)))
+              (if display-name
+                  (setq display-name (cdr display-name))
+                (setq display-name email))
+
+              (setq ical-str
+                    (concat ical-str
+                            (google-calendar-ical-fold-string (concat "\nORGANIZER;CN=" display-name ":mailto:" email))))))
+
+    (concat ical-str "\nEND:VEVENT")))
+
+(defun google-calendar-export-to-ical(events &optional ical-filename)
+  "Export a list of events to iCal format
+
+If ICAL-FILENAME is not provided, a temporary file will be used.
+
+The function returns ICAL-FILENAME"
+
+  (if (not ical-filename)
+      (setq ical-filename (make-temp-file "vcal")))
+
+  (with-current-buffer (find-file-noselect ical-filename)
+    (let ((coding-system-for-write 'utf-8))
+      (insert "BEGIN:VCALENDAR")
+      (insert "\nPRODID:-//Emacs//NONSGML google-calendar.el//EN")
+      (insert "\nVERSION:2.0")
+      (loop for event across events do
+            (insert (google-calendar-event-to-ical event)))
+      (insert "\nEND:VCALENDAR\n")
+      (save-buffer)
+      (kill-buffer)))
+
+  ical-filename)
+
 ;;;###autoload
 (defun google-calendar-add-event(calendar-name event-name event-start-date-time event-end-date-time &optional description additional-fields)
   "Create a new event on a google calendar
