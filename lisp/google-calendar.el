@@ -258,6 +258,58 @@ Returns a list whose first element is the events list and second one is the time
           (list (icalendar--all-events ical-list) (icalendar--convert-all-timezones ical-list)))
       (error "Current buffer does not contain iCalendar contents"))))
 
+(defun google-calendar-decode-isodatetime(isodatetimestring &optional day-shift
+                                                        zone)
+  "Return ISODATETIMESTRING in format like `decode-time'.
+Converts from ISO-8601 to Emacs representation.  If
+ISODATETIMESTRING specifies UTC time (trailing letter Z) the
+decoded time is given in the local time zone!  If optional
+parameter DAY-SHIFT is non-nil the result is shifted by DAY-SHIFT
+days.
+ZONE, if provided, is the timezone, in any format understood by `encode-time'.
+
+FIXME: multiple comma-separated values should be allowed!"
+  (icalendar--dmsg isodatetimestring)
+  (if isodatetimestring
+      ;; day/month/year must be present
+      (let ((year  (read (substring isodatetimestring 0 4)))
+            (month (read (substring isodatetimestring 5 7)))
+            (day   (read (substring isodatetimestring 8 10)))
+            (hour 0)
+            (minute 0)
+            (second 0))
+        (when (> (length isodatetimestring) 11)
+          ;; hour/minute present
+          (setq hour (read (substring isodatetimestring 11 13)))
+          (setq minute (read (substring isodatetimestring 14 16))))
+        (when (> (length isodatetimestring) 16)
+          ;; seconds present
+          (setq second (read (substring isodatetimestring 17 19))))
+        (when (and (> (length isodatetimestring) 19)
+                   ;; UTC specifier present
+                   (char-equal ?Z (aref isodatetimestring 19)))
+          ;; if not UTC add current-time-zone offset
+          (setq second (+ (car (current-time-zone)) second)))
+        ;; shift if necessary
+        (if day-shift
+            (let ((mdy (calendar-gregorian-from-absolute
+                        (+ (calendar-absolute-from-gregorian
+                            (list month day year))
+                           day-shift))))
+              (setq month (nth 0 mdy))
+              (setq day   (nth 1 mdy))
+              (setq year  (nth 2 mdy))))
+        ;; create the decoded date-time
+        ;; FIXME!?!
+        (condition-case nil
+            (decode-time (encode-time second minute hour day month year zone))
+          (error
+           (message "Cannot decode \"%s\"" isodatetimestring)
+           ;; hope for the best...
+           (list second minute hour day month year 0 nil 0))))
+    ;; isodatetimestring == nil
+    nil))
+
 (defun google-calendar-ical-event-to-json(event zone-map)
   "Parse the content of an iCal event into a json representation understable by google calendar"
 
@@ -267,7 +319,7 @@ Returns a list whose first element is the events list and second one is the time
                         (icalendar--get-event-property-attributes
                          event 'DTSTART)
                         zone-map))
-         (dtstart-dec (icalendar--decode-isodatetime dtstart nil
+         (dtstart-dec (google-calendar-decode-isodatetime dtstart nil
                                                      dtstart-zone))
          (start-d (icalendar--datetime-to-iso-date
                    dtstart-dec "-"))
@@ -277,9 +329,9 @@ Returns a list whose first element is the events list and second one is the time
                       (icalendar--get-event-property-attributes
                        event 'DTEND)
                       zone-map))
-         (dtend-dec (icalendar--decode-isodatetime dtend
+         (dtend-dec (google-calendar-decode-isodatetime dtend
                                                    nil dtend-zone))
-         (dtend-1-dec (icalendar--decode-isodatetime dtend -1
+         (dtend-1-dec (google-calendar-decode-isodatetime dtend -1
                                                      dtend-zone))
          end-d
          end-1-d
