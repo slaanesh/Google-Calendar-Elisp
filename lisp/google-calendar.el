@@ -457,8 +457,7 @@ FIXME: multiple comma-separated values should be allowed!"
 
     (if event-ok
         (json-encode json-data)
-      (error (format "%s\nCannot handle this event: %s"
-                     error-string event)))))
+      (error (format "Cannot handle this event: %s" event)))))
 
 (defun google-calendar-get-events(calendar-name)
   "Retrieve events from a google calendar"
@@ -473,7 +472,7 @@ If specified, FIELDS is a list of Google Calendar symbol. Default value is
   (if (not fields)
       (setq fields (list 'summary 'description)))
 
-  (let ((events []) (case-fold-search t) match in-searched-property)
+  (let ((events []) (case-fold-search t) match in-searched-property current-id)
     (loop for calendar across (google-calendar-get-events calendar-name) do
           (setq current-id nil
                 match nil
@@ -687,7 +686,7 @@ you want to update"
     (with-temp-buffer
       (insert ical-string)
       (goto-char (point-min))
-      (google-calendar-import-ical-buffer(calendar-name (current-buffer))))))
+      (google-calendar-import-ical-buffer calendar-name (current-buffer)))))
 
 ;;;###autoload
 (defun google-calendar-import-ical-buffer(calendar-name buffer)
