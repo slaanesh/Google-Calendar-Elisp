@@ -50,6 +50,7 @@
           (goto-char (point-min))
           (insert (mm-get-part handle))
           (google-calendar-import-ical-buffer calendar-name (current-buffer)))
+        (message "Event imported")
         (kill-buffer))))))
 
 
